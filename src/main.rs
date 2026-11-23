@@ -2,6 +2,10 @@
 
 mod app_window;
 mod assets;
+#[cfg(windows)]
+mod dps_overlay;
+#[cfg(windows)]
+mod game_window;
 mod keyboard;
 mod language;
 #[cfg(windows)]
@@ -41,12 +45,6 @@ fn main() -> Result<()> {
             gpui_kit::init(cx);
             language::init();
             Theme::change(ThemeMode::Dark, None, cx);
-            cx.on_window_closed(|cx, _| {
-                if cx.windows().is_empty() {
-                    cx.quit();
-                }
-            })
-            .detach();
 
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
@@ -66,6 +64,12 @@ fn main() -> Result<()> {
                 cx.new(|cx| navigation::AppView::new(window, cx))
             })
             .expect("Failed to open the Noia DNF window");
+            cx.on_window_closed(move |cx, id| {
+                if id == _window.window_id() {
+                    cx.quit();
+                }
+            })
+            .detach();
             #[cfg(windows)]
             if let Err(error) = tray::init(_window, cx) {
                 eprintln!("Failed to create system tray icon: {error:#}");

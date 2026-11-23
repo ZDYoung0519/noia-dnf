@@ -1,4 +1,6 @@
 use crate::language::{self, text};
+#[cfg(all(test, windows))]
+mod tests;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     component::{
@@ -75,6 +77,8 @@ pub struct AppView {
     selected: Page,
     keyboard: Entity<crate::keyboard::Keyboard>,
     #[cfg(windows)]
+    dps_window: Option<AnyWindowHandle>,
+    #[cfg(windows)]
     updater: Entity<crate::updater::Updater>,
     #[cfg(windows)]
     about: Entity<crate::updater::About>,
@@ -83,15 +87,75 @@ pub struct AppView {
 impl AppView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         #[cfg(windows)]
+        {
+            let view = cx.weak_entity();
+            cx.on_window_closed(move |cx, id| {
+                let view = view.clone();
+                cx.defer(move |cx| {
+                    let _ = view.update(cx, |this, cx| {
+                        if this.dps_window.is_some_and(|w| w.window_id() == id) {
+                            this.dps_window = None;
+                            cx.notify();
+                        }
+                    });
+                });
+            })
+            .detach();
+            cx.defer_in(
+                window,
+                |this, window, cx| match crate::dps_overlay::Preferences::load() {
+                    Ok(prefs) if prefs.enabled => this.set_dps_open(true, false, window, cx),
+                    Ok(_) => {}
+                    Err(err) => Self::dps_error(err, window, cx),
+                },
+            );
+        }
+        #[cfg(windows)]
         let about = cx.new(|_| crate::updater::About::new());
         Self {
             selected: Page::Home,
             keyboard: cx.new(|cx| crate::keyboard::Keyboard::new(window, cx)),
             #[cfg(windows)]
+            dps_window: None,
+            #[cfg(windows)]
             updater: cx.new(|cx| crate::updater::Updater::new(about.clone(), cx)),
             #[cfg(windows)]
             about,
         }
+    }
+
+    #[cfg(windows)]
+    fn dps_error(err: impl std::fmt::Display, window: &mut Window, cx: &mut App) {
+        use gpui_kit::component::WindowExt as _;
+        window.push_notification(format!("{} {err}", text("dps.error")), cx);
+    }
+
+    #[cfg(windows)]
+    fn set_dps_open(
+        &mut self,
+        open: bool,
+        save: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if open == self.dps_window.is_some() {
+            return;
+        }
+        if open {
+            match crate::dps_overlay::open(window, cx) {
+                Ok(handle) => self.dps_window = Some(handle),
+                Err(err) => {
+                    Self::dps_error(err, window, cx);
+                    return;
+                }
+            }
+        } else if let Some(handle) = self.dps_window.take() {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+        }
+        if save && let Err(err) = crate::dps_overlay::Preferences::set_enabled(open) {
+            Self::dps_error(err, window, cx);
+        }
+        cx.notify();
     }
     fn menu_item(&self, page: Page, cx: &Context<Self>) -> SidebarMenuItem {
         let active = self.selected == page;
@@ -231,6 +295,17 @@ impl Render for AppView {
                     .h_full()
                     .child(crate::title_bar::title_bar(cx))
                     .map(|column| {
+                        #[cfg(windows)]
+                        if page == Page::Dps {
+                            let switch =
+                                gpui_kit::component::switch::Switch::new("dps-overlay-toggle")
+                                    .label(text("dps.overlay"))
+                                    .checked(self.dps_window.is_some())
+                                    .on_change(cx.listener(|this, checked, window, cx| {
+                                        this.set_dps_open(*checked, true, window, cx);
+                                    }));
+                            return column.child(page_header(page, cx).child(switch));
+                        }
                         #[cfg(windows)]
                         if page == Page::About {
                             return column

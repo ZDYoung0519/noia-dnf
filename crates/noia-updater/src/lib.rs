@@ -1,4 +1,5 @@
 #![cfg(windows)]
+mod routes;
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::blocking::Client;
 use semver::Version;
@@ -48,6 +49,7 @@ struct Asset {
 pub struct Release {
     pub version: Version,
     asset: Asset,
+    downloads: Vec<String>,
 }
 
 pub struct Check {
@@ -89,7 +91,11 @@ fn parse_manifest(bytes: &[u8], current: &Version, releases: &str) -> Result<Che
         "Invalid SHA-256"
     );
     Ok(Check {
-        update: Some(Release { version, asset }),
+        update: Some(Release {
+            version,
+            downloads: Vec::new(),
+            asset,
+        }),
         changelog,
     })
 }
@@ -108,17 +114,7 @@ pub fn check(releases: &str, current: &str) -> Result<Check> {
     if let Ok(dir) = cache_dir() {
         remove_old_installers(&dir, &current);
     }
-    let response = client(Duration::from_secs(20))?
-        .get(format!("{releases}/latest/download/latest.json"))
-        .send()?
-        .error_for_status()?;
-    let mut bytes = Vec::new();
-    response.take(MAX_MANIFEST + 1).read_to_end(&mut bytes)?;
-    ensure!(
-        bytes.len() as u64 <= MAX_MANIFEST,
-        "Update manifest too large"
-    );
-    parse_manifest(&bytes, &current, releases)
+    routes::check(releases, &current)
 }
 
 // The app launches the installer elevated. Stage it under the system Program Files
@@ -211,19 +207,45 @@ impl Installer {
 pub fn download(release: Release, progress: impl FnMut(u8)) -> Result<Installer> {
     let dir = cache_dir()?;
     fs::create_dir_all(&dir)?;
+    download_in(&dir, release, progress)
+}
+
+fn download_in(dir: &Path, release: Release, progress: impl FnMut(u8)) -> Result<Installer> {
+    let client = client(Duration::from_secs(600))?;
+    download_from(dir, release, progress, |url| {
+        Ok(client
+            .get(url)
+            .header(reqwest::header::ACCEPT, "application/octet-stream")
+            .send()?
+            .error_for_status()?)
+    })
+}
+
+fn download_from<R: Read>(
+    dir: &Path,
+    release: Release,
+    mut progress: impl FnMut(u8),
+    mut request: impl FnMut(&str) -> Result<R>,
+) -> Result<Installer> {
     let path = dir.join(filename(&release.version));
     if let Ok(cached) = Installer::open(&path, &release.asset) {
         return Ok(cached);
     }
-    let mut file = tempfile::NamedTempFile::new_in(&dir)?;
-    let response = client(Duration::from_secs(600))?
-        .get(&release.asset.url)
-        .send()?
-        .error_for_status()?;
-    copy_verified(response, &mut file, &release.asset, progress)?;
-    file.as_file().sync_all()?;
-    drop(file.persist(&path)?);
-    Installer::open(&path, &release.asset)
+    let mut errors = Vec::new();
+    for url in &release.downloads {
+        let mut file = tempfile::NamedTempFile::new_in(dir)?;
+        progress(0);
+        if let Err(error) = request(url)
+            .and_then(|response| copy_verified(response, &mut file, &release.asset, &mut progress))
+        {
+            errors.push(format!("{url}: {error:#}"));
+            continue;
+        }
+        file.as_file().sync_all()?;
+        drop(file.persist(&path)?);
+        return Installer::open(&path, &release.asset);
+    }
+    bail!("All installer downloads failed: {}", errors.join(", "))
 }
 
 pub fn launch(prepared: &Installer) -> Result<()> {
@@ -296,5 +318,53 @@ mod tests {
         for invalid in [&b"ab"[..], &b"abd"[..], &b"abcd"[..]] {
             assert!(copy_verified(invalid, Vec::new(), &release.asset, |_| {}).is_err());
         }
+    }
+
+    #[test]
+    fn retries_failed_or_corrupt_downloads_in_latency_order() {
+        let mut release = parse_manifest(
+            &serde_json::to_vec(&manifest("1.0.0")).unwrap(),
+            &Version::new(0, 1, 0),
+            RELEASES,
+        )
+        .unwrap()
+        .update
+        .unwrap();
+        release.downloads = ["broken", "corrupt", "good"].map(String::from).to_vec();
+        let dir = tempfile::tempdir().unwrap();
+        let mut attempted = Vec::new();
+        let installer = download_from(
+            dir.path(),
+            release,
+            |_| {},
+            |url| {
+                attempted.push(url.to_string());
+                match url {
+                    "broken" => bail!("Timeout"),
+                    "corrupt" => Ok(&b"bad"[..]),
+                    _ => Ok(&b"abc"[..]),
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(attempted, ["broken", "corrupt", "good"]);
+        assert_eq!(fs::read(installer.path).unwrap(), b"abc");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    #[ignore = "Downloads the public installer into a temporary directory"]
+    fn checks_and_downloads_published_release() -> Result<()> {
+        let releases = std::env::var("NOIA_RELEASE_URL")?;
+        let expected = Version::parse(&std::env::var("NOIA_TEST_RELEASE_VERSION")?)?;
+        let check = routes::check(&releases, &Version::new(0, 0, 0))?;
+        let release = check.update.context("Missing update")?;
+        assert_eq!(release.version, expected);
+        assert_eq!(check.changelog.unwrap().version, expected.to_string());
+        eprintln!("Ranked download URLs: {:?}", release.downloads);
+        let dir = tempfile::tempdir()?;
+        let installer = download_in(dir.path(), release, |_| {})?;
+        assert!(installer.path.is_file());
+        Ok(())
     }
 }

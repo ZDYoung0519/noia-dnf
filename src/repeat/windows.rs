@@ -4,16 +4,13 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io,
     os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
-    path::Path,
     ptr::{null, null_mut},
     sync::{Arc, atomic::Ordering, mpsc},
     thread,
     time::{Duration, Instant},
 };
 use windows_sys::Win32::{
-    Foundation::{
-        CloseHandle, ERROR_INVALID_PARAMETER, HWND, LPARAM, LRESULT, WAIT_FAILED, WPARAM,
-    },
+    Foundation::{ERROR_INVALID_PARAMETER, HWND, LPARAM, LRESULT, WAIT_FAILED, WPARAM},
     System::{LibraryLoader::GetModuleHandleW, Threading::*},
     UI::{Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
 };
@@ -111,36 +108,16 @@ unsafe extern "system" fn key_hook(code: i32, msg: WPARAM, data: LPARAM) -> LRES
 }
 
 fn is_game(hwnd: HWND, own_integrity: Option<u32>, status: &WorkerStatus) -> bool {
-    if hwnd.is_null() {
+    let Some(process) = crate::game_window::dnf_process(hwnd) else {
         return false;
+    };
+    let blocked = own_integrity
+        .zip(crate::privileges::integrity(process.as_raw_handle()).ok())
+        .is_some_and(|(own, target)| target > own);
+    if status.higher_integrity.swap(blocked, Ordering::Relaxed) != blocked {
+        let _ = status.changed.try_send(());
     }
-    let mut pid = 0;
-    let mut path = [0u16; 1024];
-    let mut length = path.len() as u32;
-    unsafe {
-        GetWindowThreadProcessId(hwnd, &mut pid);
-        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if process.is_null() {
-            return false;
-        }
-        let ok = QueryFullProcessImageNameW(process, 0, path.as_mut_ptr(), &mut length);
-        let game = ok != 0
-            && Path::new(&String::from_utf16_lossy(&path[..length as usize]))
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.eq_ignore_ascii_case("DNF.exe"));
-        let mut blocked = false;
-        if game {
-            blocked = own_integrity
-                .zip(crate::privileges::integrity(process).ok())
-                .is_some_and(|(own, target)| target > own);
-            if status.higher_integrity.swap(blocked, Ordering::Relaxed) != blocked {
-                let _ = status.changed.try_send(());
-            }
-        }
-        CloseHandle(process);
-        game && !blocked
-    }
+    !blocked
 }
 
 fn repeat_input(key: u16, up: bool) -> INPUT {

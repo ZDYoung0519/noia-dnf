@@ -6,6 +6,8 @@ Noia DNF 是一款用 Rust 和 GPUI Kit 构建的 Windows x64 桌面工具。它
 
 从 [GitHub Releases](https://github.com/ZDYoung0519/noia-dnf/releases) 下载安装器，或解压便携版 ZIP 后运行 `noia-dnf.exe`。安装器支持自定义目录和桌面快捷方式。应用启动时会请求管理员权限，以便向同样以高权限运行的游戏发送按键。语言和连发设置保存在可执行文件旁的 `settings/`。
 
+DPS 悬浮窗的开关和各显示器上的拖动位置保存在可执行文件旁的 `settings/.windows_state.json`，下次启动时自动恢复。
+
 侧边栏左下角的版本号会打开关于页，显示 Logo、当前版本和最近的更新日志。启动时会自动检查更新。检查期间显示转圈，发现新版后自动下载，圆环显示实际下载百分比。校验通过后，点击 **等待升级** 并确认即可重启安装。选择 **稍后** 可以继续使用当前版本。点击 **最新版本** 可再次检查，网络或校验失败时可点击 **重试更新**。
 
 ## 本地开发
@@ -27,7 +29,9 @@ cargo test --workspace --locked --release
 NOIA_RELEASE_URL=https://github.com/ZDYoung0519/noia-dnf/releases
 ```
 
-客户端读取 `<NOIA_RELEASE_URL>/latest/download/latest.json`。清单使用 `schema_version: 1`，包含版本、双语更新日志和 `assets.windows-x86_64` 下的安装器 URL、字节数及 SHA-256。客户端只接受配置仓库中对应版本标签的安装器。安装版原地升级，便携版只替换当前目录的主程序，两种方式均保留 `settings/`。
+客户端通过 GitHub 和六个镜像并行读取 `<NOIA_RELEASE_URL>/latest/download/latest.json`，按完整清单的响应耗时选择下载渠道。它用 GitHub API 的 SHA-256 或 GitHub 直连清单核对镜像内容，跳过过期或不匹配的镜像。如果两种官方来源都不可用，本次检查会提示重试。下载中断或安装包校验失败时自动尝试下一条渠道。
+
+清单使用 `schema_version: 1`，包含版本、双语更新日志和 `assets.windows-x86_64` 下的安装器 URL、字节数及 SHA-256。客户端只接受配置仓库中对应版本标签的安装器。安装版原地升级，便携版只替换当前目录的主程序，两种方式均保留 `settings/`。
 
 ## 打包和发布
 
