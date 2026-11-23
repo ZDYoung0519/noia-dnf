@@ -1,0 +1,3 @@
+Source: https://github.com/lucide-icons/lucide
+Commit: 57d236ffbbf228b9c318f4aa6fcef95b6336899a
+SVG files copied unchanged. QQ and WeChat use generic conversation symbols, not brand logos.

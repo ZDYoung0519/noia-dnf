@@ -1,0 +1,3 @@
+Generated with the built-in image_gen tool.
+
+Use case: logo-brand. Create one original square Windows application logo for Noia, a DNF game companion plugin. A striking geometric capital N monogram with a single diagonal sword-like stroke, bold solid silhouette, restrained fantasy game emblem character but modern desktop utility simplicity. Flat vector-like graphic, crisp clean edges, high contrast, no fine detail. Centered rounded-square dark graphite tile with a bright cool luminous N and a subtle warm accent, generous safe margins, readable at 16px and 32px. Single isolated finished icon, no presentation board, no surrounding text, no mockup, no watermark, no official game logo. Transparent outside rounded tile. Output square PNG.
