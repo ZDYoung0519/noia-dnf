@@ -24,16 +24,7 @@ fn supported(code: &str) -> Option<&'static str> {
 
 pub fn init() {
     let saved = crate::settings::path("language.json")
-        .and_then(|path| {
-            crate::settings::read_or_create(&path, || {
-                let code = match crate::settings::legacy("language") {
-                    Ok(bytes) => supported(&String::from_utf8_lossy(&bytes)).unwrap_or(DEFAULT),
-                    Err(err) if err.kind() == io::ErrorKind::NotFound => DEFAULT,
-                    Err(err) => return Err(err),
-                };
-                Ok(code.to_owned())
-            })
-        })
+        .and_then(|path| crate::settings::read_or_create(&path, DEFAULT.to_owned()))
         .unwrap_or_else(|err| {
             eprintln!("Reading language preference: {err}");
             DEFAULT.to_owned()

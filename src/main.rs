@@ -15,6 +15,8 @@ mod single_instance;
 mod title_bar;
 #[cfg(windows)]
 mod tray;
+#[cfg(windows)]
+mod updater;
 
 use gpui_kit::{
     component::{Theme, ThemeMode, TitleBar},

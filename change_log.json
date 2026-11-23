@@ -1,0 +1,18 @@
+{
+  "releases": [
+    {
+      "version": "0.1.1",
+      "items": [
+        { "zh-CN": "关于页可查看当前版本和历史版本的更新内容。", "en": "The About page now lists changes for the installed version and earlier releases." },
+        { "zh-CN": "更新清单和 GitHub 发布说明使用同一份中英文版本日志。", "en": "The updater and GitHub Releases now share the same bilingual release notes." }
+      ]
+    },
+    {
+      "version": "0.1.0",
+      "items": [
+        { "zh-CN": "按键连发支持逐键选择，可在 5 至 1000 ms 之间调整间隔。", "en": "Select individual keys and set a repeat interval from 5 to 1000 ms." },
+        { "zh-CN": "侧边栏支持检查更新、查看下载进度和重启升级。", "en": "Check for updates, track the download, and restart to upgrade from the sidebar." }
+      ]
+    }
+  ]
+}

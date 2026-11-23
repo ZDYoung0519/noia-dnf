@@ -5,19 +5,23 @@ mod windows;
 #[cfg(windows)]
 pub use windows::Worker;
 
-pub struct Stats {
+pub struct WorkerStatus {
     pub higher_integrity: std::sync::atomic::AtomicBool,
-    pub sent: std::sync::atomic::AtomicU64,
     pub failed: std::sync::atomic::AtomicBool,
-    pub changed: async_channel::Sender<()>,
+    changed: async_channel::Sender<()>,
 }
-impl Stats {
+impl WorkerStatus {
     pub fn new(changed: async_channel::Sender<()>) -> Self {
         Self {
             higher_integrity: Default::default(),
             changed,
-            sent: Default::default(),
             failed: Default::default(),
+        }
+    }
+
+    pub fn report_failure(&self) {
+        if !self.failed.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            let _ = self.changed.try_send(());
         }
     }
 }
@@ -26,7 +30,7 @@ impl Stats {
 pub struct Worker;
 #[cfg(not(windows))]
 impl Worker {
-    pub fn start(_: Settings, _: std::sync::Arc<Stats>) -> io::Result<Self> {
+    pub fn start(_: Settings, _: std::sync::Arc<WorkerStatus>) -> io::Result<Self> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "Key repeat requires Windows",
@@ -48,22 +52,15 @@ pub struct Settings {
 }
 
 fn default_interval() -> u64 {
-    10
+    50
 }
 
 impl Settings {
     pub fn load() -> io::Result<Self> {
-        Self::read(&crate::settings::path("rapid-fire.json")?, || {
-            crate::settings::legacy("rapid-fire.json")
-        })
+        Self::read(&crate::settings::path("rapid-fire.json")?)
     }
-    fn read(path: &Path, legacy: impl FnOnce() -> io::Result<Vec<u8>>) -> io::Result<Self> {
-        crate::settings::read_or_create(path, || match legacy() {
-            Ok(bytes) => serde_json::from_slice::<Self>(&bytes)?.validated(),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(e),
-        })?
-        .validated()
+    fn read(path: &Path) -> io::Result<Self> {
+        crate::settings::read_or_create(path, Self::default())?.validated()
     }
     fn validated(self) -> io::Result<Self> {
         if !(MIN_INTERVAL_MS..=MAX_INTERVAL_MS).contains(&self.interval_ms)
@@ -101,12 +98,17 @@ mod tests {
     fn settings_round_trip_and_invalid_input() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("rapid-fire.json");
-        let read = || Settings::read(&file, || Err(io::ErrorKind::NotFound.into()));
+        let read = || Settings::read(&file);
         let defaults = read().unwrap();
         assert!(!defaults.enabled);
-        assert_eq!(defaults.interval_ms, 10);
+        assert_eq!(defaults.interval_ms, 50);
+        assert!(defaults.keys.is_empty());
+        assert_eq!(
+            serde_json::from_slice::<Settings>(&std::fs::read(&file).unwrap()).unwrap(),
+            defaults
+        );
         std::fs::write(&file, b"{}").unwrap();
-        assert_eq!(read().unwrap().interval_ms, 10);
+        assert_eq!(read().unwrap().interval_ms, 50);
         let mut config = Settings {
             enabled: true,
             interval_ms: 120,
@@ -122,21 +124,5 @@ mod tests {
             crate::settings::save(&file, &config).unwrap();
             assert!(read().is_err());
         }
-    }
-
-    #[test]
-    fn imports_previous_profile_only_if_portable_file_is_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("settings/rapid-fire.json");
-        let imported = Settings::read(&file, || {
-            Ok(br#"{"enabled":true,"keys":[31],"interval_ms":50}"#.to_vec())
-        })
-        .unwrap();
-        assert!(imported.enabled && imported.keys.contains(&31));
-        assert_eq!(imported.interval_ms, 50);
-        assert_eq!(
-            Settings::read(&file, || panic!("unexpected second import")).unwrap(),
-            imported
-        );
     }
 }

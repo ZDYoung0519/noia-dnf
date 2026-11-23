@@ -1,7 +1,11 @@
 use crate::language::{self, text};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    component::{ActiveTheme as _, Icon, StyledExt as _, sidebar::*},
+    component::{
+        ActiveTheme as _, Icon, Sizable as _, StyledExt as _,
+        button::{Button, ButtonVariants as _},
+        sidebar::*,
+    },
     *,
 };
 
@@ -18,6 +22,7 @@ pub enum Page {
     Qq,
     WeChat,
     Settings,
+    About,
 }
 
 impl Page {
@@ -33,6 +38,7 @@ impl Page {
             Self::Qq => "nav.qq",
             Self::WeChat => "nav.wechat",
             Self::Settings => "nav.settings",
+            Self::About => "nav.about",
         })
     }
 
@@ -47,7 +53,7 @@ impl Page {
             Self::Rankings => "icons/lucide/trophy.svg",
             Self::Qq => "icons/lucide/message-circle.svg",
             Self::WeChat => "icons/lucide/messages-square.svg",
-            Self::Settings => "icons/lucide/settings-2.svg",
+            Self::Settings | Self::About => "icons/lucide/settings-2.svg",
         }
     }
 
@@ -68,13 +74,23 @@ pub const RECORDS: [Page; 2] = [Page::Dungeons, Page::Rankings];
 pub struct AppView {
     selected: Page,
     keyboard: Entity<crate::keyboard::Keyboard>,
+    #[cfg(windows)]
+    updater: Entity<crate::updater::Updater>,
+    #[cfg(windows)]
+    about: Entity<crate::updater::About>,
 }
 
 impl AppView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        #[cfg(windows)]
+        let about = cx.new(|_| crate::updater::About::new());
         Self {
             selected: Page::Home,
             keyboard: cx.new(|cx| crate::keyboard::Keyboard::new(window, cx)),
+            #[cfg(windows)]
+            updater: cx.new(|cx| crate::updater::Updater::new(about.clone(), cx)),
+            #[cfg(windows)]
+            about,
         }
     }
     fn menu_item(&self, page: Page, cx: &Context<Self>) -> SidebarMenuItem {
@@ -145,7 +161,27 @@ impl AppView {
                             .pt_2()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child(concat!("Noia DNF  ·  v", env!("CARGO_PKG_VERSION"))),
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                Button::new("about-version")
+                                    .ghost()
+                                    .xsmall()
+                                    .compact()
+                                    .label(concat!("v", env!("CARGO_PKG_VERSION")))
+                                    .tooltip(text("nav.about"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.selected = Page::About;
+                                        cx.notify();
+                                    })),
+                            )
+                            .map(|row| {
+                                #[cfg(windows)]
+                                let row = row.child(self.updater.clone());
+                                row
+                            }),
                     ),
             )
     }
@@ -195,6 +231,12 @@ impl Render for AppView {
                     .h_full()
                     .child(crate::title_bar::title_bar(cx))
                     .map(|column| {
+                        #[cfg(windows)]
+                        if page == Page::About {
+                            return column
+                                .child(page_header(page, cx))
+                                .child(self.about.clone());
+                        }
                         if page == Page::RapidFire {
                             column.child(self.keyboard.clone())
                         } else {
@@ -222,7 +264,18 @@ impl Render for AppView {
                                             .child(page.description()),
                                     )
                                     .when(page == Page::Settings, |view| {
-                                        view.child(language::picker())
+                                        let view = view.child(language::picker());
+                                        #[cfg(windows)]
+                                        let view = view.child(
+                                            Button::new("check-updates")
+                                                .small()
+                                                .label(text("update.check"))
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.updater
+                                                        .update(cx, |updater, cx| updater.check(cx))
+                                                })),
+                                        );
+                                        view
                                     }),
                             )
                         }

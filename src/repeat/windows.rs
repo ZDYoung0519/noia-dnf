@@ -1,4 +1,4 @@
-use super::{Settings, Stats};
+use super::{Settings, WorkerStatus};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
@@ -19,6 +19,9 @@ use windows_sys::Win32::{
 };
 
 const EDGE: u32 = WM_APP + 1;
+// Match the reference client's vkFF + physical scan code for repeat pulses.
+// KEYEVENTF_SCANCODE would make Windows ignore this virtual key.
+const REPEAT_VK: u16 = 0xff;
 
 pub struct Worker {
     id: u32,
@@ -26,14 +29,13 @@ pub struct Worker {
 }
 
 impl Worker {
-    pub fn start(config: Settings, stats: Arc<Stats>) -> io::Result<Self> {
+    pub fn start(config: Settings, status: Arc<WorkerStatus>) -> io::Result<Self> {
         let (ready, started) = mpsc::sync_channel(1);
         let thread = thread::Builder::new()
             .name("noia-key-repeat".into())
             .spawn(move || {
-                if let Err(err) = run(config, &stats, &ready) {
-                    stats.failed.store(true, Ordering::Relaxed);
-                    let _ = stats.changed.try_send(());
+                if let Err(err) = run(config, &status, &ready) {
+                    status.report_failure();
                     let _ = ready.send(Err(io::Error::other(err.to_string())));
                 }
             })?;
@@ -59,7 +61,6 @@ impl Drop for Worker {
 struct Physical {
     selected: BTreeSet<u16>,
     down: BTreeSet<u16>,
-    repeating: BTreeMap<u16, usize>,
 }
 thread_local! { static PHYSICAL: RefCell<Physical> = RefCell::default(); }
 
@@ -82,35 +83,34 @@ unsafe extern "system" fn key_hook(code: i32, msg: WPARAM, data: LPARAM) -> LRES
         // Windows owns this structure for the duration of the hook callback.
         let event = unsafe { &*(data as *const KBDLLHOOKSTRUCT) };
         if let Some(key) = hardware_key(event) {
-            let suppress = PHYSICAL.with_borrow_mut(|physical| {
+            PHYSICAL.with_borrow_mut(|physical| {
                 if !physical.selected.contains(&key) {
-                    return false;
+                    return;
                 }
-                let hwnd = unsafe { GetForegroundWindow() } as usize;
                 if event.flags & LLKHF_UP != 0 {
-                    physical.down.remove(&key);
-                    physical.repeating.remove(&key);
-                    unsafe {
-                        PostThreadMessageW(GetCurrentThreadId(), EDGE, key as usize, 0);
+                    if physical.down.remove(&key) {
+                        unsafe {
+                            PostThreadMessageW(GetCurrentThreadId(), EDGE, key as usize, 0);
+                        }
                     }
                 } else if physical.down.insert(key) {
                     unsafe {
-                        PostThreadMessageW(GetCurrentThreadId(), EDGE, key as usize, hwnd as isize);
+                        PostThreadMessageW(
+                            GetCurrentThreadId(),
+                            EDGE,
+                            key as usize,
+                            GetForegroundWindow() as isize,
+                        );
                     }
-                } else {
-                    return physical.repeating.get(&key) == Some(&hwnd);
                 }
-                false
             });
-            if suppress {
-                return 1;
-            }
         }
     }
+    // Let Windows handle the original key, including its normal typing repeat.
     unsafe { CallNextHookEx(null_mut(), code, msg, data) }
 }
 
-fn is_game(hwnd: HWND, own_integrity: Option<u32>, stats: &Stats) -> bool {
+fn is_game(hwnd: HWND, own_integrity: Option<u32>, status: &WorkerStatus) -> bool {
     if hwnd.is_null() {
         return false;
     }
@@ -134,8 +134,8 @@ fn is_game(hwnd: HWND, own_integrity: Option<u32>, stats: &Stats) -> bool {
             blocked = own_integrity
                 .zip(crate::privileges::integrity(process).ok())
                 .is_some_and(|(own, target)| target > own);
-            if stats.higher_integrity.swap(blocked, Ordering::Relaxed) != blocked {
-                let _ = stats.changed.try_send(());
+            if status.higher_integrity.swap(blocked, Ordering::Relaxed) != blocked {
+                let _ = status.changed.try_send(());
             }
         }
         CloseHandle(process);
@@ -143,31 +143,29 @@ fn is_game(hwnd: HWND, own_integrity: Option<u32>, stats: &Stats) -> bool {
     }
 }
 
-fn input(key: u16, up: bool) -> INPUT {
+fn repeat_input(key: u16, up: bool) -> INPUT {
     INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT {
+                wVk: REPEAT_VK,
                 wScan: key & 0xff,
-                dwFlags: KEYEVENTF_SCANCODE
-                    | if key & 0x100 != 0 {
-                        KEYEVENTF_EXTENDEDKEY
-                    } else {
-                        0
-                    }
-                    | if up { KEYEVENTF_KEYUP } else { 0 },
+                dwFlags: if key & 0x100 != 0 {
+                    KEYEVENTF_EXTENDEDKEY
+                } else {
+                    0
+                } | if up { KEYEVENTF_KEYUP } else { 0 },
                 ..Default::default()
             },
         },
     }
 }
 
-// The physical down starts the first press. Space releases and presses apart so
-// clients sampling keyboard state can observe both phases.
+// The physical key passes through. Track the extra pulse independently so that
+// even a physical key-up halfway through a pulse closes its synthetic down.
 struct Hold {
     hwnd: HWND,
     due: Instant,
-    release_next: bool,
     synthetic_down: bool,
 }
 
@@ -179,7 +177,7 @@ impl Hold {
         foreground: HWND,
         down: bool,
         mut emit: impl FnMut(bool) -> bool,
-        stats: &Stats,
+        status: &WorkerStatus,
     ) -> bool {
         if !down || foreground != self.hwnd {
             return false;
@@ -187,16 +185,11 @@ impl Hold {
         if now < self.due {
             return true;
         }
-        if !emit(self.release_next) {
-            stats.failed.store(true, Ordering::Relaxed);
+        if !emit(self.synthetic_down) {
+            status.report_failure();
             return false;
         }
-        if self.release_next && self.synthetic_down {
-            stats.sent.fetch_add(1, Ordering::Relaxed);
-            let _ = stats.changed.try_send(());
-        }
-        self.synthetic_down = !self.release_next;
-        self.release_next = !self.release_next;
+        self.synthetic_down = !self.synthetic_down;
         self.due = if self.due + half_period > now {
             self.due + half_period
         } else {
@@ -204,10 +197,16 @@ impl Hold {
         };
         true
     }
+
+    fn finish(&self, key: u16, status: &WorkerStatus) {
+        if self.synthetic_down && !send(key, true) {
+            status.report_failure();
+        }
+    }
 }
 
 fn send(key: u16, up: bool) -> bool {
-    let event = input(key, up);
+    let event = repeat_input(key, up);
     unsafe { SendInput(1, &event, size_of::<INPUT>() as i32) == 1 }
 }
 
@@ -262,7 +261,7 @@ fn next_message(timer: &OwnedHandle, deadline: Option<Instant>) -> io::Result<Op
 
 fn run(
     config: Settings,
-    stats: &Stats,
+    status: &WorkerStatus,
     ready: &mpsc::SyncSender<io::Result<u32>>,
 ) -> io::Result<()> {
     let interval = Duration::from_millis(config.interval_ms);
@@ -294,22 +293,22 @@ fn run(
             }
             let key = msg.wParam as u16;
             let hwnd = msg.lParam as HWND;
-            held.remove(&key);
+            if let Some(hold) = held.remove(&key) {
+                hold.finish(key, status);
+            }
             if !hwnd.is_null()
                 && hwnd == unsafe { GetForegroundWindow() }
-                && is_game(hwnd, own_integrity, stats)
+                && is_game(hwnd, own_integrity, status)
                 && PHYSICAL.with_borrow(|p| p.down.contains(&key))
             {
                 held.insert(
                     key,
                     Hold {
                         hwnd,
-                        due: Instant::now() + interval / 2,
-                        release_next: true,
+                        due: Instant::now() + interval,
                         synthetic_down: false,
                     },
                 );
-                PHYSICAL.with_borrow_mut(|p| p.repeating.insert(key, hwnd as usize));
             }
         } else {
             let now = Instant::now();
@@ -322,14 +321,10 @@ fn run(
                     foreground,
                     down,
                     |up| send(key, up),
-                    stats,
+                    status,
                 );
                 if !keep {
-                    let _ = stats.changed.try_send(());
-                    PHYSICAL.with_borrow_mut(|p| p.repeating.remove(&key));
-                    if down && hold.synthetic_down {
-                        send(key, true);
-                    }
+                    hold.finish(key, status);
                 }
                 keep
             });
@@ -337,9 +332,7 @@ fn run(
     };
     unsafe {
         for (key, hold) in held {
-            if hold.synthetic_down {
-                send(key, true);
-            }
+            hold.finish(key, status);
         }
         UnhookWindowsHookEx(hook);
     }
@@ -372,11 +365,11 @@ mod tests {
         let hwnd = std::ptr::dangling_mut();
         let period = Duration::from_millis(40);
         let start = Instant::now();
-        let stats = Stats::new(async_channel::bounded(1).0);
+        let (changed, notifications) = async_channel::bounded(1);
+        let status = WorkerStatus::new(changed);
         let mut hold = Hold {
             hwnd,
             due: start + period,
-            release_next: true,
             synthetic_down: false,
         };
         let mut edges = Vec::new();
@@ -390,11 +383,10 @@ mod tests {
                     edges.push(up);
                     true
                 },
-                &stats
+                &status
             ));
         }
-        assert_eq!(edges, [true, false, true, false, true]);
-        assert_eq!(stats.sent.load(Ordering::Relaxed), 2);
+        assert_eq!(edges, [false, true, false, true, false]);
         for (foreground, down) in [(null_mut(), true), (hwnd, false)] {
             assert!(!hold.tick(
                 start + period * 10,
@@ -402,12 +394,21 @@ mod tests {
                 foreground,
                 down,
                 |_| panic!("unexpected output"),
-                &stats
+                &status
             ));
         }
-        assert!(!hold.tick(start + period * 10, period, hwnd, true, |_| false, &stats));
-        assert!(stats.failed.load(Ordering::Relaxed));
-        assert_eq!(stats.sent.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            notifications.try_recv(),
+            Err(async_channel::TryRecvError::Empty)
+        );
+        assert!(!hold.tick(start + period * 10, period, hwnd, true, |_| false, &status));
+        assert!(status.failed.load(Ordering::Relaxed));
+        assert_eq!(notifications.try_recv(), Ok(()));
+        status.report_failure();
+        assert_eq!(
+            notifications.try_recv(),
+            Err(async_channel::TryRecvError::Empty)
+        );
     }
 
     #[test]
@@ -421,20 +422,114 @@ mod tests {
         assert_eq!(hardware_key(&event), Some(0x11c));
         event.flags |= LLKHF_INJECTED;
         assert_eq!(hardware_key(&event), None);
-        // INPUT_KEYBOARD is the active union member produced by input().
-        let release = unsafe { input(0x11c, true).Anonymous.ki };
+        // INPUT_KEYBOARD is the active union member produced by repeat_input().
+        let press = unsafe { repeat_input(0x1f, false).Anonymous.ki };
+        assert_eq!((press.wVk, press.wScan, press.dwFlags), (0xff, 0x1f, 0));
+        let release = unsafe { repeat_input(0x11c, true).Anonymous.ki };
+        assert_eq!(release.wVk, 0xff);
         assert_eq!(release.wScan, 0x1c);
-        assert_eq!(
-            release.dwFlags,
-            KEYEVENTF_SCANCODE | KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP
-        );
+        assert_eq!(release.dwFlags, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP);
+    }
+
+    #[test]
+    #[ignore = "Requires an interactive Windows desktop and briefly focuses a test edit control"]
+    fn repeat_pulses_preserve_scan_code_without_adding_text() {
+        use ::windows::Win32::{
+            Foundation::HWND as WindowHandle,
+            UI::Input::Ime::{HIMC, ImmAssociateContext},
+        };
+        unsafe {
+            let edit = CreateWindowExW(
+                0,
+                windows_sys::w!("EDIT"),
+                windows_sys::w!("Noia input test - click here"),
+                WS_OVERLAPPEDWINDOW,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                320,
+                100,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null(),
+            );
+            assert!(!edit.is_null());
+            // Test committed Latin text, independent of the user's active IME.
+            let previous_ime = ImmAssociateContext(WindowHandle(edit), HIMC::default());
+            ShowWindow(edit, SW_SHOW);
+            SetForegroundWindow(edit);
+            SetFocus(edit);
+            let ready = Instant::now() + Duration::from_secs(45);
+            while GetForegroundWindow() != edit && Instant::now() < ready {
+                let mut msg = MSG::default();
+                while PeekMessageW(&mut msg, edit, 0, 0, PM_REMOVE) != 0 {
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            SetWindowTextW(edit, windows_sys::w!(""));
+            // Use a plain S as the physical-key stand-in, bracketing four actual
+            // production pulses. Submit one batch only to our focused window.
+            let mut ordinary_down = repeat_input(0x1f, false);
+            ordinary_down.Anonymous.ki.wVk = 0x53;
+            let mut ordinary_up = ordinary_down;
+            ordinary_up.Anonymous.ki.dwFlags = KEYEVENTF_KEYUP;
+            let mut events = vec![ordinary_down];
+            for _ in 0..4 {
+                events.extend([repeat_input(0x1f, false), repeat_input(0x1f, true)]);
+            }
+            events.push(ordinary_up);
+            assert_eq!(GetForegroundWindow(), edit);
+            assert_eq!(GetFocus(), edit);
+            assert_eq!(
+                SendInput(
+                    events.len() as u32,
+                    events.as_ptr(),
+                    size_of::<INPUT>() as i32
+                ),
+                events.len() as u32
+            );
+
+            let mut pulses = Vec::new();
+            let mut saw_release = false;
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let mut msg = MSG::default();
+                while PeekMessageW(&mut msg, edit, 0, 0, PM_REMOVE) != 0 {
+                    if matches!(msg.message, WM_KEYDOWN | WM_KEYUP) {
+                        let scan = (msg.lParam >> 16) & 0xff;
+                        if msg.wParam == REPEAT_VK as usize {
+                            pulses.push((msg.message == WM_KEYUP, scan));
+                        }
+                        saw_release |= msg.message == WM_KEYUP && msg.wParam == 0x53;
+                    }
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+                if saw_release || Instant::now() >= deadline {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+            let mut text = [0u16; 32];
+            let len = GetWindowTextW(edit, text.as_mut_ptr(), text.len() as i32);
+            ImmAssociateContext(WindowHandle(edit), previous_ime);
+            DestroyWindow(edit);
+            assert!(saw_release);
+            assert_eq!(pulses, [(false, 0x1f), (true, 0x1f)].repeat(4));
+            assert_eq!(
+                String::from_utf16_lossy(&text[..len as usize]).to_ascii_lowercase(),
+                "s"
+            );
+        }
     }
 
     #[test]
     fn windows_hook_starts_and_shuts_down_without_any_selected_keys() {
         let worker = Worker::start(
             Settings::default(),
-            Arc::new(Stats::new(async_channel::bounded(1).0)),
+            Arc::new(WorkerStatus::new(async_channel::bounded(1).0)),
         )
         .unwrap();
         drop(worker);

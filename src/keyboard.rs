@@ -1,6 +1,6 @@
 use crate::language::text;
 use crate::repeat::{MAX_INTERVAL_MS, MIN_INTERVAL_MS, Settings};
-use crate::repeat::{Stats, Worker};
+use crate::repeat::{Worker, WorkerStatus};
 use gpui_kit::{
     component::{
         ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _,
@@ -214,7 +214,7 @@ pub struct Keyboard {
     interval_input: Entity<InputState>,
     config: Settings,
     worker: Option<Worker>,
-    stats: Arc<Stats>,
+    status: Arc<WorkerStatus>,
     load_failed: bool,
 }
 
@@ -226,9 +226,6 @@ impl Keyboard {
                 if this.update(cx, |_, cx| cx.notify()).is_err() {
                     break;
                 }
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(250))
-                    .await;
             }
         })
         .detach();
@@ -275,7 +272,7 @@ impl Keyboard {
             slider,
             interval_input,
             worker: None,
-            stats: Arc::new(Stats::new(tx)),
+            status: Arc::new(WorkerStatus::new(tx)),
             load_failed,
         };
         this.restart();
@@ -342,13 +339,13 @@ impl Keyboard {
 
     fn restart(&mut self) {
         self.worker.take();
-        self.stats.higher_integrity.store(false, Ordering::Relaxed);
-        self.stats.failed.store(false, Ordering::Relaxed);
+        self.status.higher_integrity.store(false, Ordering::Relaxed);
+        self.status.failed.store(false, Ordering::Relaxed);
         if self.config.enabled && !self.config.keys.is_empty() {
-            match Worker::start(self.config.clone(), self.stats.clone()) {
+            match Worker::start(self.config.clone(), self.status.clone()) {
                 Ok(worker) => self.worker = Some(worker),
                 Err(error) => {
-                    self.stats.failed.store(true, Ordering::Relaxed);
+                    self.status.report_failure();
                     eprintln!("Key repeat unavailable: {error}");
                 }
             }
@@ -456,19 +453,14 @@ impl Render for Keyboard {
                     .items_end()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child(if self.load_failed {
-                        text("repeat.load_error")
-                    } else if self.stats.higher_integrity.load(Ordering::Relaxed) {
-                        text("repeat.higher_integrity")
-                    } else if self.stats.failed.load(Ordering::Relaxed) {
-                        text("repeat.failed")
+                    .children(if self.load_failed {
+                        Some(text("repeat.load_error"))
+                    } else if self.status.higher_integrity.load(Ordering::Relaxed) {
+                        Some(text("repeat.higher_integrity"))
+                    } else if self.status.failed.load(Ordering::Relaxed) {
+                        Some(text("repeat.failed"))
                     } else {
-                        rust_i18n::t!(
-                            "repeat.sent",
-                            count = self.stats.sent.load(Ordering::Relaxed)
-                        )
-                        .into_owned()
-                        .into()
+                        None
                     }),
             );
         div()

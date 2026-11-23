@@ -12,21 +12,12 @@ pub fn path(name: &str) -> io::Result<PathBuf> {
     Ok(dir.join("settings").join(name))
 }
 
-pub fn legacy(name: &str) -> io::Result<Vec<u8>> {
-    let dir = dirs::config_dir().ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
-    fs::read(dir.join("Noia DNF").join(name))
-}
-
-pub fn read_or_create<T: DeserializeOwned + Serialize>(
-    path: &Path,
-    initial: impl FnOnce() -> io::Result<T>,
-) -> io::Result<T> {
+pub fn read_or_create<T: DeserializeOwned + Serialize>(path: &Path, default: T) -> io::Result<T> {
     match fs::read(path) {
         Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            let value = initial()?;
-            save(path, &value)?;
-            Ok(value)
+            save(path, &default)?;
+            Ok(default)
         }
         Err(e) => Err(e),
     }
