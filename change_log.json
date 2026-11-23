@@ -1,6 +1,12 @@
 {
   "releases": [
     {
+      "version": "0.1.2",
+      "items": [
+        { "zh-CN": "测试版本，用于验证客户端从 0.1.1 检测、下载并重启升级到 0.1.2 的流程。", "en": "Test release for verifying that version 0.1.1 detects and downloads the update, then restarts into version 0.1.2." }
+      ]
+    },
+    {
       "version": "0.1.1",
       "items": [
         { "zh-CN": "关于页可查看当前版本和历史版本的更新内容。", "en": "The About page now lists changes for the installed version and earlier releases." },
