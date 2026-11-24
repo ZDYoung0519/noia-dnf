@@ -75,6 +75,10 @@ pub const RECORDS: [Page; 2] = [Page::Dungeons, Page::Rankings];
 
 pub struct AppView {
     selected: Page,
+    #[cfg(windows)]
+    startup: Option<Result<bool, String>>,
+    #[cfg(windows)]
+    startup_busy: bool,
     keyboard: Entity<crate::keyboard::Keyboard>,
     #[cfg(windows)]
     dps_window: Option<AnyWindowHandle>,
@@ -114,6 +118,10 @@ impl AppView {
         let about = cx.new(|_| crate::updater::About::new());
         Self {
             selected: Page::Home,
+            #[cfg(windows)]
+            startup: None,
+            #[cfg(windows)]
+            startup_busy: false,
             keyboard: cx.new(|cx| crate::keyboard::Keyboard::new(window, cx)),
             #[cfg(windows)]
             dps_window: None,
@@ -157,6 +165,66 @@ impl AppView {
         }
         cx.notify();
     }
+    #[cfg(windows)]
+    fn configure_startup(&mut self, enabled: Option<bool>, cx: &mut Context<Self>) {
+        if self.startup_busy {
+            return;
+        }
+        self.startup_busy = true;
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            crate::autostart::configure(enabled).map_err(|error| error.to_string())
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |this, cx| {
+                this.startup = Some(result);
+                this.startup_busy = false;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    #[cfg(windows)]
+    fn startup_control(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        use gpui_kit::component::{Disableable as _, switch::Switch};
+        let state = self.startup.as_ref();
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_2()
+            .child(
+                Switch::new("autostart")
+                    .label(text("startup.label"))
+                    .checked(matches!(state, Some(Ok(true))))
+                    .disabled(self.startup_busy || !matches!(state, Some(Ok(_))))
+                    .on_change(cx.listener(|this, checked, _, cx| {
+                        this.configure_startup(Some(*checked), cx)
+                    })),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(text("startup.hint")),
+            )
+            .when_some(state.and_then(|s| s.as_ref().err()), |view, err| {
+                view.child(
+                    div()
+                        .text_sm()
+                        .child(format!("{} {err}", text("startup.error"))),
+                )
+                .child(
+                    Button::new("retry-startup")
+                        .small()
+                        .label(text("startup.retry"))
+                        .on_click(cx.listener(|this, _, _, cx| this.configure_startup(None, cx))),
+                )
+            })
+    }
+
     fn menu_item(&self, page: Page, cx: &Context<Self>) -> SidebarMenuItem {
         let active = self.selected == page;
         SidebarMenuItem::new(page.title())
@@ -179,6 +247,10 @@ impl AppView {
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.selected = page;
+                #[cfg(windows)]
+                if page == Page::Settings {
+                    this.configure_startup(None, cx);
+                }
                 cx.notify();
             }))
     }
@@ -341,7 +413,7 @@ impl Render for AppView {
                                     .when(page == Page::Settings, |view| {
                                         let view = view.child(language::picker());
                                         #[cfg(windows)]
-                                        let view = view.child(
+                                        let view = view.child(self.startup_control(cx)).child(
                                             Button::new("check-updates")
                                                 .small()
                                                 .label(text("update.check"))

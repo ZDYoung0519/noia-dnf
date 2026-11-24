@@ -1,4 +1,8 @@
 {
+  "startup.label": "Start in the system tray when I sign in to Windows",
+  "startup.hint": "Portable copies, standard accounts and unprotected install paths may require UAC approval at sign-in.",
+  "startup.error": "Could not read or change the startup task.",
+  "startup.retry": "Read startup status again",
   "nav.about": "About NoiA",
   "about.changelog": "Recent changes",
   "update.check": "Check for updates",

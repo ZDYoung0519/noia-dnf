@@ -62,7 +62,7 @@ pub fn integrity(process: HANDLE) -> io::Result<u32> {
 }
 
 /// Only the elevated instance proceeds to single-instance election and starts GPUI.
-pub fn ensure_high_integrity() -> io::Result<bool> {
+pub fn ensure_high_integrity(autostart: bool) -> io::Result<bool> {
     if integrity(unsafe { GetCurrentProcess() })? >= SECURITY_MANDATORY_HIGH_RID as u32 {
         return Ok(true);
     }
@@ -76,7 +76,11 @@ pub fn ensure_high_integrity() -> io::Result<bool> {
         fMask: SEE_MASK_NOASYNC,
         lpVerb: windows_sys::w!("runas"),
         lpFile: exe.as_ptr(),
-        lpParameters: null(),
+        lpParameters: if autostart {
+            windows_sys::w!("--autostart")
+        } else {
+            null()
+        },
         nShow: SW_SHOWNORMAL,
         ..Default::default()
     };

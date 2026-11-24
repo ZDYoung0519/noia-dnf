@@ -52,6 +52,8 @@ LangString FileInUse ${LANG_ENGLISH} "Could not update the application file. Clo
 LangString FileInUse ${LANG_SIMPCHINESE} "无法更新程序文件。请退出 Noia DNF 后重试，或取消安装。"
 LangString RemoveFailed ${LANG_ENGLISH} "Could not remove the application file. Close Noia DNF and retry, or cancel."
 LangString RemoveFailed ${LANG_SIMPCHINESE} "无法移除程序文件。请退出 Noia DNF 后重试，或取消卸载。"
+LangString StartupCleanupFailed ${LANG_ENGLISH} "Windows could not remove the logon task. Check the Task Scheduler service and retry."
+LangString StartupCleanupFailed ${LANG_SIMPCHINESE} "无法清理登录启动任务。请确认 Windows 任务计划程序服务可用，然后重试。"
 
 Function .onInit
     ${IfNot} ${IsNativeAMD64}
@@ -165,6 +167,28 @@ Section "Uninstall"
         Abort
     ${EndIf}
     retry_delete:
+    ; Remove logon tasks owned by this installation, including other users' tasks.
+    ; Pass the path as data so quotes and PowerShell syntax cannot change the command.
+    System::Call 'kernel32::SetEnvironmentVariableW(w "NOIA_UNINSTALL_EXE", w "$INSTDIR\noia-dnf.exe") i.r0'
+    ${If} $0 != 0
+        StrCpy $2 "$$ErrorActionPreference='Stop'; $$env:PSModulePath=[IO.Path]::Combine($$PSHOME,'Modules');"
+        StrCpy $2 "$2 try { $$s=New-Object -ComObject Schedule.Service; $$s.Connect(); $$f=$$s.GetFolder('\');"
+        StrCpy $2 "$2 foreach ($$t in @($$f.GetTasks(1))) {"
+        StrCpy $2 "$2 if ($$t.Name -notmatch '^Noia\.DNF\.Logon\.S-1-[0-9-]+$$' -or $$t.Definition.Actions.Count -ne 1) { continue };"
+        StrCpy $2 "$2 $$a=$$t.Definition.Actions.Item(1);"
+        StrCpy $2 "$2 if ($$a.Path -eq $$env:NOIA_UNINSTALL_EXE -and $$a.Arguments -eq '--autostart') { $$f.DeleteTask($$t.Name,0) }"
+        StrCpy $2 "$2 } } catch { exit 1 }"
+        nsExec::ExecToStack `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "$2"`
+        Pop $0
+        Pop $1
+    ${Else}
+        StrCpy $0 1
+    ${EndIf}
+    ${If} $0 != 0
+        MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "$(StartupCleanupFailed)" /SD IDCANCEL IDRETRY retry_delete
+        SetErrorLevel 1
+        Abort
+    ${EndIf}
     ClearErrors
     Delete "$INSTDIR\noia-dnf.exe"
     ${If} ${Errors}

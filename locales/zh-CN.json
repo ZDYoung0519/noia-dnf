@@ -1,4 +1,8 @@
 {
+  "startup.label": "登录 Windows 时启动到托盘",
+  "startup.hint": "便携版、普通账户或非受保护安装目录在登录时可能需要确认 UAC。",
+  "startup.error": "无法读取或更改启动任务。",
+  "startup.retry": "重新读取启动状态",
   "nav.about": "关于 NoiA",
   "about.changelog": "最近的更新日志",
   "update.check": "检查更新",

@@ -1,6 +1,14 @@
 {
   "releases": [
     {
+      "version": "0.1.4",
+      "items": [
+        { "zh-CN": "设置中新增「登录 Windows 时启动到托盘」，默认关闭。开启后，登录时 NoiA 会在系统托盘运行，手动双击应用图标可唤回主窗口。", "en": "A new setting lets NoiA start in the system tray when you sign in to Windows. It is off by default. Double-click the app icon to bring back the main window." },
+        { "zh-CN": "管理员账户使用受保护的安装目录时，登录启动通常无需再次确认 UAC。使用便携版、标准账户或普通用户可修改的安装目录时，Windows 仍可能提示授权。", "en": "Administrators using a protected installation directory can normally start NoiA at sign-in without another UAC prompt. Windows may still ask for approval for portable copies, standard accounts, or installations that ordinary users can modify." },
+        { "zh-CN": "登录启动开关会读取 Windows 任务计划程序中的实际状态。原地升级保留启动设置，卸载时会清理该安装目录对应的启动任务。", "en": "The startup switch reflects the task’s status in Windows Task Scheduler. In-place updates preserve the setting, and uninstalling removes startup tasks for that installation." }
+      ]
+    },
+    {
       "version": "0.1.3",
       "items": [
         { "zh-CN": "DPS 统计新增可从任意位置拖动的无边框悬浮窗，默认开启，可在 DPS 统计页关闭。", "en": "The DPS page now has a borderless overlay. It is enabled by default, can be dragged from anywhere, and can be turned off on the DPS page." },

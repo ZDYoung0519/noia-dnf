@@ -3,6 +3,8 @@
 mod app_window;
 mod assets;
 #[cfg(windows)]
+mod autostart;
+#[cfg(windows)]
 mod dps_overlay;
 #[cfg(windows)]
 mod game_window;
@@ -28,12 +30,13 @@ use gpui_kit::{
 };
 
 fn main() -> Result<()> {
+    let autostart = cfg!(windows) && std::env::args_os().skip(1).any(|arg| arg == "--autostart");
     #[cfg(windows)]
-    if !privileges::ensure_high_integrity()? {
+    if !privileges::ensure_high_integrity(autostart)? {
         return Ok(());
     }
     #[cfg(windows)]
-    let Some(instance) = single_instance::SingleInstance::acquire()? else {
+    let Some(instance) = single_instance::SingleInstance::acquire(!autostart)? else {
         return Ok(());
     };
     #[cfg(windows)]
@@ -47,6 +50,8 @@ fn main() -> Result<()> {
             Theme::change(ThemeMode::Dark, None, cx);
 
             let options = WindowOptions {
+                show: !autostart,
+                focus: !autostart,
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                     None,
                     size(px(1440.0), px(860.0)),
@@ -73,6 +78,9 @@ fn main() -> Result<()> {
             #[cfg(windows)]
             if let Err(error) = tray::init(_window, cx) {
                 eprintln!("Failed to create system tray icon: {error:#}");
+                if autostart {
+                    app_window::show(_window, cx);
+                }
             }
             #[cfg(windows)]
             cx.spawn(async move |cx| {
@@ -81,7 +89,9 @@ fn main() -> Result<()> {
                 }
             })
             .detach();
-            app_window::show(_window, cx);
+            if !autostart {
+                app_window::show(_window, cx);
+            }
         });
     // Keep the named mutex alive until GPUI's event loop has stopped.
     #[cfg(windows)]

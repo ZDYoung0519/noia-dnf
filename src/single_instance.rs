@@ -22,12 +22,12 @@ pub struct SingleInstance {
 }
 
 impl SingleInstance {
-    /// None means the existing instance was notified; the caller must exit.
-    pub fn acquire() -> windows::core::Result<Option<Self>> {
-        Self::acquire_named(APP_ID)
+    /// Manual launches activate the existing window. Logon launches yield silently.
+    pub fn acquire(activate_existing: bool) -> windows::core::Result<Option<Self>> {
+        Self::acquire_named(APP_ID, activate_existing)
     }
 
-    fn acquire_named(name: &str) -> windows::core::Result<Option<Self>> {
+    fn acquire_named(name: &str, activate_existing: bool) -> windows::core::Result<Option<Self>> {
         // Create/open the event before election so another launch can signal
         // immediately, even while the first process is still initializing GPUI.
         let activate = unsafe {
@@ -47,7 +47,9 @@ impl SingleInstance {
         };
         if already_running {
             // SAFETY: activate owns a valid event handle throughout the call.
-            unsafe { SetEvent(HANDLE(activate.as_raw_handle()))? };
+            if activate_existing {
+                unsafe { SetEvent(HANDLE(activate.as_raw_handle()))? };
+            }
             return Ok(None);
         }
         Ok(Some(Self {
@@ -93,13 +95,26 @@ mod tests {
         let Ok(name) = std::env::var("NOIA_TEST_INSTANCE_NAME") else {
             return;
         };
-        assert!(SingleInstance::acquire_named(&name).unwrap().is_none());
+        assert!(
+            SingleInstance::acquire_named(&name, true)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn duplicate_launch_signals_primary_and_exit_releases_gate() {
         let name = format!("Local\\Noia.Test.{}", std::process::id());
-        let primary = SingleInstance::acquire_named(&name).unwrap().unwrap();
+        let primary = SingleInstance::acquire_named(&name, true).unwrap().unwrap();
+        assert!(
+            SingleInstance::acquire_named(&name, false)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            unsafe { WaitForSingleObject(HANDLE(primary.activate.as_raw_handle()), 0) },
+            windows::Win32::Foundation::WAIT_TIMEOUT
+        );
         // Signal before any listener exists, covering the startup race.
         let status = Command::new(std::env::current_exe().unwrap())
             .args([
@@ -116,6 +131,10 @@ mod tests {
             WAIT_OBJECT_0
         );
         drop(primary);
-        assert!(SingleInstance::acquire_named(&name).unwrap().is_some());
+        assert!(
+            SingleInstance::acquire_named(&name, true)
+                .unwrap()
+                .is_some()
+        );
     }
 }
